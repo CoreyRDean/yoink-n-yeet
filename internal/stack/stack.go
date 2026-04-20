@@ -32,11 +32,11 @@ import (
 // Entry is the public handle to a stack entry. Callers get Path to read the
 // raw bytes and MetaPath for the JSON metadata sidecar.
 type Entry struct {
-	ID       string    `json:"id"`       // filename stem (zero-padded unix nanos)
-	Created  time.Time `json:"created"`  // wall-clock creation time
-	Size     int64     `json:"size"`     // payload byte count
-	SHA256   string    `json:"sha256"`   // hex-encoded sha256 of payload
-	Source   string    `json:"source"`   // command that produced it, or "stdin"
+	ID       string    `json:"id"`      // filename stem (zero-padded unix nanos)
+	Created  time.Time `json:"created"` // wall-clock creation time
+	Size     int64     `json:"size"`    // payload byte count
+	SHA256   string    `json:"sha256"`  // hex-encoded sha256 of payload
+	Source   string    `json:"source"`  // command that produced it, or "stdin"
 	Tags     []string  `json:"tags,omitempty"`
 	Path     string    `json:"-"` // absolute path to .bin
 	MetaPath string    `json:"-"` // absolute path to .json

@@ -25,10 +25,10 @@ const (
 
 // Event is a single recorded stats row.
 type Event struct {
-	Time   time.Time `json:"t"`           // event wall clock
-	Op     Op        `json:"op"`          // push or pop
-	Size   int64     `json:"size"`        // bytes of payload
-	Source string    `json:"src,omitempty"` // command source (push only)
+	Time   time.Time `json:"t"`                // event wall clock
+	Op     Op        `json:"op"`               // push or pop
+	Size   int64     `json:"size"`             // bytes of payload
+	Source string    `json:"src,omitempty"`    // command source (push only)
 	AgeMs  int64     `json:"age_ms,omitempty"` // how long the popped entry lived (pop only)
 }
 
@@ -51,15 +51,15 @@ func Append(path string, e Event) error {
 
 // Summary is the rolled-up view of the stats log at a point in time.
 type Summary struct {
-	Pushes         int64            `json:"pushes"`
-	Pops           int64            `json:"pops"`
-	BytesPushed    int64            `json:"bytes_pushed"`
-	BytesPopped    int64            `json:"bytes_popped"`
-	FirstEvent     *time.Time       `json:"first_event,omitempty"`
-	LastEvent      *time.Time       `json:"last_event,omitempty"`
-	AvgAgeAtPopMs  float64          `json:"avg_age_at_pop_ms,omitempty"`
-	TopSources     []SourceCount    `json:"top_sources,omitempty"`
-	PerDay         map[string]int64 `json:"per_day,omitempty"`
+	Pushes        int64            `json:"pushes"`
+	Pops          int64            `json:"pops"`
+	BytesPushed   int64            `json:"bytes_pushed"`
+	BytesPopped   int64            `json:"bytes_popped"`
+	FirstEvent    *time.Time       `json:"first_event,omitempty"`
+	LastEvent     *time.Time       `json:"last_event,omitempty"`
+	AvgAgeAtPopMs float64          `json:"avg_age_at_pop_ms,omitempty"`
+	TopSources    []SourceCount    `json:"top_sources,omitempty"`
+	PerDay        map[string]int64 `json:"per_day,omitempty"`
 }
 
 // SourceCount pairs a command source with its push count.
@@ -187,4 +187,3 @@ func humanBytes(n int64) string {
 		return fmt.Sprintf("%.1f GiB", float64(n)/(kb*kb*kb))
 	}
 }
-

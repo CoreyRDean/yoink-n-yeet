@@ -377,41 +377,43 @@ func doPush(paths platform.Paths, cfg *config.Config, o *opts) error {
 		data   []byte
 		source string
 	)
-	if len(o.rest) > 0 {
+	switch {
+	case len(o.rest) > 0:
 		// Run the user's command, capture stdout, stream stderr through.
 		cmd := exec.Command(o.rest[0], o.rest[1:]...)
 		var buf bytes.Buffer
 		cmd.Stdout = &buf
 		cmd.Stderr = os.Stderr
 		cmd.Stdin = os.Stdin
-		err := cmd.Run()
+		runErr := cmd.Run()
 		// We push whatever stdout was produced even on non-zero exit so
 		// partial output isn't lost; the error surfaces afterwards.
 		data = buf.Bytes()
 		source = strings.Join(o.rest, " ")
-		if err != nil {
+		if runErr != nil {
 			if len(data) > 0 {
 				code := -1
-				if ee, ok := err.(*exec.ExitError); ok {
+				var ee *exec.ExitError
+				if errors.As(runErr, &ee) {
 					code = ee.ExitCode()
 				}
 				fmt.Fprintf(os.Stderr, "yoink-n-yeet: pushed %d bytes despite non-zero exit (code %d) from %q\n",
 					len(data), code, source)
-				if err2 := pushCommit(s, cfg, paths, data, source, o); err2 != nil {
-					return err2
+				if commitErr := pushCommit(s, cfg, paths, data, source, o); commitErr != nil {
+					return commitErr
 				}
 			}
-			return err
+			return runErr
 		}
-	} else if !isTTY(os.Stdin) {
+	case !isTTY(os.Stdin):
 		// Pipe in.
-		b, err := io.ReadAll(os.Stdin)
-		if err != nil {
-			return err
+		b, readErr := io.ReadAll(os.Stdin)
+		if readErr != nil {
+			return readErr
 		}
 		data = b
 		source = "stdin"
-	} else {
+	default:
 		return errors.New("nothing to push: provide a command (e.g. 'yk cat file') or pipe input (e.g. 'cmd | yk')")
 	}
 
