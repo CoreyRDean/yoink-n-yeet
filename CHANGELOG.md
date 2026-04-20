@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.3] — 2026-04-20
+### Changed
+- CI toolchain refresh: `actions/checkout` 4→6, `actions/setup-go`
+  5→6, `github/codeql-action` 3→4, `goreleaser/goreleaser-action`
+  6→7. No runtime impact; keeps the pipeline on supported actions.
+- README rewrite focused on install-to-DAU conversion and SEO —
+  prominent `curl | bash` and (eventual) `brew install`, feature
+  matrix, trust signals (checksums + cosign), troubleshooting.
+### Fixed
+- Unblocked `shellcheck` and `golangci-lint` in CI. Dropped an unused
+  `REPO` var in `uninstall.sh` (SC2034) and downgraded `.golangci.yaml`
+  to the v1 schema that ships with `golangci-lint-action@v6`; will
+  flip back to v2 when the action itself bumps.
+- Applied `gofmt` to `internal/stack/stack.go` and
+  `internal/stats/stats.go` (struct-tag alignment) and rewrote the
+  push-source `if`-chain in `cmd/yoink-n-yeet/main.go` as a `switch`
+  with an `errors.As` check on `*exec.ExitError`. Pure cleanup — no
+  behavior change.
 ## [0.1.2] — 2026-04-20
 ### Fixed
 - Update-check TTL is now actually enforced. `BackgroundCheck` stats the
@@ -84,7 +102,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - MIT license; CODEOWNERS; issue and PR templates; branch protection
   requiring review.
 
-[Unreleased]: https://github.com/CoreyRDean/yoink-n-yeet/compare/v0.1.2...HEAD
+[Unreleased]: https://github.com/CoreyRDean/yoink-n-yeet/compare/v0.1.3...HEAD
+[0.1.3]: https://github.com/CoreyRDean/yoink-n-yeet/releases/tag/v0.1.3
 [0.1.2]: https://github.com/CoreyRDean/yoink-n-yeet/releases/tag/v0.1.2
 [0.1.1]: https://github.com/CoreyRDean/yoink-n-yeet/releases/tag/v0.1.1
 [0.1.0]: https://github.com/CoreyRDean/yoink-n-yeet/releases/tag/v0.1.0
