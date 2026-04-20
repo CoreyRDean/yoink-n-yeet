@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.1] — 2026-04-19
+### Added
+- `--report [title] [body]` files an issue on the upstream repo, preferring
+  the `gh` CLI when available and authenticated, otherwise opening the
+  GitHub web issue form with fields prefilled.
+- `--show` now defaults to index 0 (top of the stack) when called without a
+  numeric argument, mirroring `--peek`.
+- `install.sh --local` derives the version from `git describe --tags
+  --always --dirty` so `yt --version` reports a useful string like
+  `v0.1.0-3-gccedc7e[-dirty]` instead of the opaque `v0.0.0-dev` sentinel.
+### Fixed
+- Installer's sha256 verification no longer spuriously fails because it was
+  matching sibling `.sbom.json` rows in the checksum file.
+- Installer re-runs no longer corrupt `config.json` into invalid JSON when
+  patching `installed_version`. The generated config now keeps a
+  never-patched field last so trailing commas stay valid.
 ## [0.1.0] — 2026-04-19
 
 ### Added
@@ -40,5 +56,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - MIT license; CODEOWNERS; issue and PR templates; branch protection
   requiring review.
 
-[Unreleased]: https://github.com/CoreyRDean/yoink-n-yeet/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/CoreyRDean/yoink-n-yeet/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/CoreyRDean/yoink-n-yeet/releases/tag/v0.1.1
 [0.1.0]: https://github.com/CoreyRDean/yoink-n-yeet/releases/tag/v0.1.0
