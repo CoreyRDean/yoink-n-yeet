@@ -28,6 +28,7 @@ import (
 	"github.com/CoreyRDean/yoink-n-yeet/internal/buildinfo"
 	"github.com/CoreyRDean/yoink-n-yeet/internal/clipboard"
 	"github.com/CoreyRDean/yoink-n-yeet/internal/config"
+	"github.com/CoreyRDean/yoink-n-yeet/internal/pick"
 	"github.com/CoreyRDean/yoink-n-yeet/internal/platform"
 	"github.com/CoreyRDean/yoink-n-yeet/internal/redact"
 	"github.com/CoreyRDean/yoink-n-yeet/internal/stack"
@@ -64,8 +65,11 @@ type opts struct {
 	// mutually-exclusive operation modifiers
 	list      bool
 	listJSON  bool
-	show      int // -1 = not set
+	show      bool   // was --show seen?
+	showArg   string // raw index token: "", "first", "last", or decimal
 	peek      bool
+	pickFlag  bool   // was --pick seen?
+	pickArg   string // raw index token: "", "first", "last", or decimal
 	dry       bool
 	drain     bool
 	drainDays int
@@ -94,7 +98,7 @@ type opts struct {
 // parseArgs consumes os.Args[1:] and produces opts. Unknown flags are
 // returned as errors.
 func parseArgs(argv []string) (*opts, error) {
-	o := &opts{show: -1}
+	o := &opts{}
 	i := 0
 	for i < len(argv) {
 		a := argv[i]
@@ -112,20 +116,24 @@ func parseArgs(argv []string) (*opts, error) {
 				o.statsJSON = true
 			}
 		case a == "--show":
-			// Default to 0 (top of stack) if no numeric argument follows. This
-			// makes `yt --show` behave like `yt --peek`, which is what users
-			// reach for when they just want to see what's on top.
-			o.show = 0
+			// Optional argument: an integer, "first" (top = 0), or "last"
+			// (bottom = Len-1). Missing argument defaults to "first", which
+			// matches --peek.
+			o.show = true
 			if i+1 < len(argv) && !strings.HasPrefix(argv[i+1], "-") {
-				n, err := strconv.Atoi(argv[i+1])
-				if err != nil {
-					return nil, fmt.Errorf("--show: %w", err)
-				}
-				o.show = n
+				o.showArg = argv[i+1]
 				i++
 			}
 		case a == "--peek":
 			o.peek = true
+		case a == "--pick":
+			// Optional argument: integer, "first", "last", or nothing.
+			// No argument + TTY = interactive picker; no argument + no TTY = no-op.
+			o.pickFlag = true
+			if i+1 < len(argv) && !strings.HasPrefix(argv[i+1], "-") {
+				o.pickArg = argv[i+1]
+				i++
+			}
 		case a == "--dry":
 			o.dry = true
 		case a == "--drain", a == "--clear":
@@ -270,10 +278,12 @@ func run() error {
 		return update.Apply(cfg, o.update, os.Stderr)
 	case o.list:
 		return doList(paths, cfg, o.listJSON)
-	case o.show >= 0:
-		return doShow(paths, o.show)
+	case o.show:
+		return doShow(paths, o.showArg)
 	case o.peek:
-		return doShow(paths, 0)
+		return doShow(paths, "first")
+	case o.pickFlag:
+		return doPick(paths, o.pickArg)
 	case o.drain:
 		return doDrain(paths, o)
 	}
@@ -448,8 +458,20 @@ func doList(paths platform.Paths, cfg *config.Config, asJSON bool) error {
 	return nil
 }
 
-func doShow(paths platform.Paths, idx int) error {
+func doShow(paths platform.Paths, arg string) error {
 	s, err := stack.New(paths.StackDir())
+	if err != nil {
+		return err
+	}
+	n, err := s.Len()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		fmt.Fprintln(os.Stderr, "stack is empty")
+		return nil
+	}
+	idx, err := resolveIndex(arg, n)
 	if err != nil {
 		return err
 	}
@@ -459,6 +481,90 @@ func doShow(paths platform.Paths, idx int) error {
 	}
 	_, err = os.Stdout.Write(data)
 	return err
+}
+
+// doPick moves an entry to the top of the stack. If pickArg is a numeric
+// index (or "first"/"last"), the move is performed non-interactively. If
+// pickArg is empty and we have a TTY on both stdin and stderr, we launch
+// the arrow-key picker; otherwise we no-op with a stderr notice.
+func doPick(paths platform.Paths, pickArg string) error {
+	s, err := stack.New(paths.StackDir())
+	if err != nil {
+		return err
+	}
+	n, err := s.Len()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		fmt.Fprintln(os.Stderr, "stack is empty")
+		return nil
+	}
+
+	var idx int
+	if pickArg != "" {
+		idx, err = resolveIndex(pickArg, n)
+		if err != nil {
+			return err
+		}
+	} else {
+		if !isTTY(os.Stdin) || !isTTY(os.Stderr) {
+			fmt.Fprintln(os.Stderr, "yoink-n-yeet: --pick without an index requires a TTY; pass --pick N (or first/last)")
+			return nil
+		}
+		ents, err := s.List()
+		if err != nil {
+			return err
+		}
+		items := make([]pick.Item, len(ents))
+		for i, e := range ents {
+			raw, _ := os.ReadFile(e.Path)
+			items[i] = pick.Item{Label: fmt.Sprintf("[%d] %s  %s  %s",
+				i,
+				e.Created.Local().Format("15:04:05"),
+				humanSize(e.Size),
+				redact.Preview(string(raw), 60))}
+		}
+		picked, err := pick.Run(items, "Pick an entry to move to the top  (↑↓/jk move, ⏎ select, q cancel):")
+		if err != nil {
+			if errors.Is(err, pick.ErrCancelled) {
+				return nil
+			}
+			return err
+		}
+		idx = picked
+	}
+
+	if err := s.MoveToTop(idx); err != nil {
+		return err
+	}
+	// Mirror the new top to the OS clipboard so Cmd-V matches the stack.
+	if _, top, err := s.Peek(); err == nil {
+		if cb, err := clipboard.Detect(); err == nil {
+			_ = cb.Copy(top)
+		}
+	}
+	return nil
+}
+
+// resolveIndex parses a human-friendly index token into a 0-based index
+// against a stack of length n. "" and "first" resolve to 0; "last" resolves
+// to n-1; otherwise the token is parsed as a decimal integer.
+func resolveIndex(tok string, n int) (int, error) {
+	switch strings.ToLower(tok) {
+	case "", "first", "top":
+		return 0, nil
+	case "last", "bottom":
+		return n - 1, nil
+	}
+	idx, err := strconv.Atoi(tok)
+	if err != nil {
+		return -1, fmt.Errorf("invalid index %q (want an integer, \"first\", or \"last\")", tok)
+	}
+	if idx < 0 || idx >= n {
+		return -1, fmt.Errorf("index %d out of range (valid: 0..%d)", idx, n-1)
+	}
+	return idx, nil
 }
 
 func doDrain(paths platform.Paths, o *opts) error {
@@ -751,8 +857,12 @@ Usage:
 
 Flags (valid on either name):
   --list [--json]             list stack (0 = top)
-  --show N                    print entry N to stdout (no consumption)
-  --peek                      alias for --show 0
+  --show [N|first|last]       print entry N (default: first/top) to stdout
+                              (no consumption)
+  --peek                      alias for --show first
+  --pick [N|first|last]       move entry N to the top of the stack; with no
+                              arg launches an arrow-key picker on a TTY and
+                              no-ops otherwise
   --dry                       preview + interactive prompt
   --drain, --clear            wipe the stack (confirms)
   --drain --days N            drop entries older than N days

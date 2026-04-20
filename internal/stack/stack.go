@@ -192,6 +192,28 @@ func (s *Stack) Drain(olderThan time.Duration, all, secure bool) (int, error) {
 // debug output).
 func (s *Stack) Dir() string { return s.dir }
 
+// MoveToTop moves the entry at idx to the top of the stack (index 0).
+// Implementation: read the existing entry, delete it, then Push the same
+// bytes + source. Push generates a fresh nanosecond-precision ID so the
+// re-inserted entry sorts as the newest. No-op when idx is already 0.
+func (s *Stack) MoveToTop(idx int) error {
+	if idx == 0 {
+		return nil
+	}
+	e, data, err := s.At(idx)
+	if err != nil {
+		return err
+	}
+	if err := os.Remove(e.Path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	if err := os.Remove(e.MetaPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	_, err = s.Push(data, e.Source)
+	return err
+}
+
 // ----- internals -----
 
 // list enumerates entries, top first.
