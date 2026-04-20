@@ -1,10 +1,13 @@
-version: "2"
-
+# golangci-lint v1 config schema. The golangci-lint-action@v6 pin ships
+# golangci-lint 1.x, which rejects the v2 schema with
+# "the configuration contains invalid elements". When we upgrade the
+# action to v7+ and golangci-lint v2.x, flip this file to `version: "2"`
+# and move settings under `linters.settings` / `formatters`.
 run:
   timeout: 5m
 
 linters:
-  default: none
+  disable-all: true
   enable:
     - errcheck
     - govet
@@ -15,19 +18,16 @@ linters:
     - gocritic
     - revive
     - gosec
-
-  settings:
-    gosec:
-      excludes:
-        - G204 # we intentionally exec user-provided commands (that's the point)
-        - G304 # reading paths we derive ourselves is fine
-    revive:
-      rules:
-        - name: indent-error-flow
-        - name: var-declaration
-        - name: unexported-return
-
-formatters:
-  enable:
     - gofmt
     - goimports
+
+linters-settings:
+  gosec:
+    excludes:
+      - G204 # we intentionally exec user-provided commands (that's the point)
+      - G304 # reading paths we derive ourselves is fine
+  revive:
+    rules:
+      - name: indent-error-flow
+      - name: var-declaration
+      - name: unexported-return

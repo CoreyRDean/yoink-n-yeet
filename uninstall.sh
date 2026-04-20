@@ -9,7 +9,6 @@
 
 set -eu
 
-REPO="CoreyRDean/yoink-n-yeet"
 APP="yoink-n-yeet"
 PURGE=0
 ASSUME_YES=0
