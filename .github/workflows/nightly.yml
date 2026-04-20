@@ -43,7 +43,7 @@ jobs:
           git tag -a "${{ steps.tag.outputs.tag }}" -m "Nightly build of main"
           git push origin "${{ steps.tag.outputs.tag }}"
 
-      - uses: goreleaser/goreleaser-action@v6
+      - uses: goreleaser/goreleaser-action@v7
         with:
           distribution: goreleaser
           version: latest
