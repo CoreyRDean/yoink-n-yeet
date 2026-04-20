@@ -203,6 +203,10 @@ CFG_FILE="$CFG_DIR/config.json"
 
 if [ ! -f "$CFG_FILE" ]; then
     INSTALLED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    # Field order matters: awk patches below replace channel / installed_at /
+    # installed_version / local_repo_path with lines that always carry a
+    # trailing comma. To keep that valid JSON on re-runs, a field the awk
+    # script never touches (max_depth) lives last.
     if [ "$LOCAL" -eq 1 ]; then
         cat >"$CFG_FILE" <<EOF
 {
@@ -211,10 +215,10 @@ if [ ! -f "$CFG_FILE" ]; then
   "auto_update": false,
   "update_check": true,
   "preview_width": 80,
-  "max_depth": 0,
   "local_repo_path": "$REPO_PATH",
   "installed_at": "$INSTALLED_AT",
-  "installed_version": "$VERSION"
+  "installed_version": "$VERSION",
+  "max_depth": 0
 }
 EOF
     else
@@ -225,23 +229,27 @@ EOF
   "auto_update": false,
   "update_check": true,
   "preview_width": 80,
-  "max_depth": 0,
   "installed_at": "$INSTALLED_AT",
-  "installed_version": "$VERSION"
+  "installed_version": "$VERSION",
+  "max_depth": 0
 }
 EOF
     fi
     log "wrote config: $CFG_FILE"
 else
-    # Re-run: patch channel + installed_* metadata without destroying user prefs.
+    # Re-run: patch channel + installed_* metadata without destroying user
+    # prefs. Each patched line keeps a trailing comma; the config template
+    # puts max_depth last so the resulting JSON stays valid.
     tmp_cfg=$(mktemp)
     INSTALLED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
     awk -v ch="$CHANNEL" -v ia="$INSTALLED_AT" -v iv="$VERSION" -v rp="${REPO_PATH:-}" '
-        BEGIN { patched_ch=0; patched_ia=0; patched_iv=0; patched_rp=0 }
-        /"channel"[[:space:]]*:/        { print "  \"channel\": \"" ch "\","; patched_ch=1; next }
-        /"installed_at"[[:space:]]*:/   { print "  \"installed_at\": \"" ia "\","; patched_ia=1; next }
-        /"installed_version"[[:space:]]*:/ { print "  \"installed_version\": \"" iv "\","; patched_iv=1; next }
-        /"local_repo_path"[[:space:]]*:/ { if (rp != "") { print "  \"local_repo_path\": \"" rp "\","; patched_rp=1 } else { next } ; next }
+        /"channel"[[:space:]]*:/        { print "  \"channel\": \"" ch "\","; next }
+        /"installed_at"[[:space:]]*:/   { print "  \"installed_at\": \"" ia "\","; next }
+        /"installed_version"[[:space:]]*:/ { print "  \"installed_version\": \"" iv "\","; next }
+        /"local_repo_path"[[:space:]]*:/ {
+            if (rp != "") { print "  \"local_repo_path\": \"" rp "\"," }
+            next
+        }
         { print }
     ' "$CFG_FILE" >"$tmp_cfg"
     mv "$tmp_cfg" "$CFG_FILE"
