@@ -38,3 +38,11 @@ You can expect:
   shell if you prefer.
 - **No telemetry.** The only network I/O is the opt-in update check against
   `api.github.com/repos/CoreyRDean/yoink-n-yeet/releases`.
+- **Stack payloads are stored unencrypted at rest.** Entries live as
+  `<unix_nanos>.bin` files under the platform data dir with `0o600`
+  permissions (readable only by the user account). This is appropriate
+  for a single-user developer workstation and *not* appropriate for
+  shared or multi-user machines, live session recordings, or for
+  payloads whose cleartext disclosure on disk would be a serious
+  problem. If you push sensitive material, treat a periodic `yk --drain`
+  as hygiene rather than relying on the redaction in `--list` previews.

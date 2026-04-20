@@ -20,6 +20,11 @@ Your clipboard is a single cell of state. Every time you copy something new,
 you lose the thing you had before. yoink-n-yeet fixes that by making your
 clipboard the top of a stack you actually own.
 
+GUI clipboard managers (Raycast, Paste, Maccy, Win+V, GNOME's Clipboard
+Indicator) solve this for mouse-driven apps. **yoink-n-yeet is the CLI
+counterpart — a stack that composes with pipes, redirects, and shell
+scripts**, so `cmd | yk` and `yt | cmd` Just Work.
+
 - Copy `item1` → clipboard has `item1`.
 - Copy `item2` → clipboard has `item2`. `item1` is still safe, one pop away.
 - `Cmd-V` (or `pbpaste`) pastes `item2` as many times as you want.
@@ -33,7 +38,7 @@ It's a clipboard stack. It's boring. It's the right primitive.
 curl -fsSL https://raw.githubusercontent.com/CoreyRDean/yoink-n-yeet/main/install.sh | bash
 ```
 
-Or with Homebrew (coming soon — see [#1](https://github.com/CoreyRDean/yoink-n-yeet/issues) for tap setup):
+Or with Homebrew (coming soon — see the [Homebrew tap note in CHANGELOG.md](./CHANGELOG.md)):
 
 ```sh
 brew install CoreyRDean/tap/yoink-n-yeet

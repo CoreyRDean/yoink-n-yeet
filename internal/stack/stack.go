@@ -175,7 +175,11 @@ func (s *Stack) Drain(olderThan time.Duration, all, secure bool) (int, error) {
 			continue
 		}
 		if secure {
+			// The metadata sidecar stores the Source command, which often
+			// leaks as much as the payload (e.g. an AWS CLI invocation that
+			// names a secret). Zero both files, not just the payload.
 			_ = overwrite(e.Path, e.Size)
+			_ = overwrite(e.MetaPath, 0)
 		}
 		if err := os.Remove(e.Path); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return removed, err
@@ -193,25 +197,59 @@ func (s *Stack) Drain(olderThan time.Duration, all, secure bool) (int, error) {
 func (s *Stack) Dir() string { return s.dir }
 
 // MoveToTop moves the entry at idx to the top of the stack (index 0).
-// Implementation: read the existing entry, delete it, then Push the same
-// bytes + source. Push generates a fresh nanosecond-precision ID so the
-// re-inserted entry sorts as the newest. No-op when idx is already 0.
+// It renames both files to a fresh top-sort-order ID while preserving the
+// original Created timestamp in the metadata. This is what a user expects
+// from "move to top": the entry sorts first now, but age-based filters
+// like --drain --days N still see it as old.
 func (s *Stack) MoveToTop(idx int) error {
 	if idx == 0 {
 		return nil
 	}
-	e, data, err := s.At(idx)
+	ents, err := s.list()
 	if err != nil {
 		return err
 	}
-	if err := os.Remove(e.Path); err != nil && !errors.Is(err, os.ErrNotExist) {
+	if idx >= len(ents) {
+		return ErrOutOfRange
+	}
+	e := ents[idx]
+
+	// Generate a fresh top-sort ID the same way Push does.
+	var nonce [4]byte
+	if _, err := rand.Read(nonce[:]); err != nil {
 		return err
 	}
-	if err := os.Remove(e.MetaPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+	newID := fmt.Sprintf("%019d-%s", time.Now().UTC().UnixNano(), hex.EncodeToString(nonce[:]))
+	newBin := filepath.Join(s.dir, newID+".bin")
+	newMeta := filepath.Join(s.dir, newID+".json")
+
+	// Rename bin first; if that fails we've changed nothing.
+	if err := os.Rename(e.Path, newBin); err != nil {
 		return err
 	}
-	_, err = s.Push(data, e.Source)
-	return err
+	// Meta rename second; roll bin back on failure so we don't orphan files.
+	if err := os.Rename(e.MetaPath, newMeta); err != nil {
+		_ = os.Rename(newBin, e.Path)
+		return err
+	}
+
+	// Patch the metadata so its ID field matches the new filename. Created,
+	// Source, SHA256, Size, Tags are all preserved.
+	raw, readErr := os.ReadFile(newMeta)
+	if readErr != nil {
+		return nil // metadata is desynced but the entry is usable; log nothing
+	}
+	var meta Entry
+	if err := json.Unmarshal(raw, &meta); err != nil {
+		return nil
+	}
+	meta.ID = newID
+	newRaw, err := json.MarshalIndent(&meta, "", "  ")
+	if err != nil {
+		return nil
+	}
+	_ = writeFileAtomic(newMeta, append(newRaw, '\n'), 0o600)
+	return nil
 }
 
 // ----- internals -----

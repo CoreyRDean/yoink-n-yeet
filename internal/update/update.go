@@ -52,6 +52,13 @@ type Asset struct {
 	Size               int64  `json:"size"`
 }
 
+// CheckTTL bounds how often we'll hit api.github.com. The TTL is enforced
+// against the cache file's mtime: a stat that returns a modtime newer than
+// now-CheckTTL short-circuits BackgroundCheck entirely. This keeps tight
+// shell loops (e.g. `for i in ...; do yk ... ; done`) from exhausting the
+// anonymous rate limit.
+const CheckTTL = 24 * time.Hour
+
 // BackgroundCheck spawns a detached goroutine that refreshes the latest
 // version for the user's channel. The call returns immediately.
 //
@@ -61,8 +68,15 @@ type Asset struct {
 //   - The banner (if any) is written synchronously at program start
 //     *from the previous run's cached result*, so users see it on the
 //     very next invocation but never pay latency for it.
+//
+// The goroutine is a no-op when a cached result exists and is younger than
+// CheckTTL, so the common case costs one stat().
 func BackgroundCheck(cfg *config.Config, cachePath string) {
 	if cfg == nil || !cfg.UpdateCheck {
+		return
+	}
+	// TTL gate: if the cache file is fresh enough, don't even spawn.
+	if fi, err := os.Stat(cachePath); err == nil && time.Since(fi.ModTime()) < CheckTTL {
 		return
 	}
 	go func() {

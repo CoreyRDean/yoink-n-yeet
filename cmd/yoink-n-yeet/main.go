@@ -64,7 +64,6 @@ func defaultAction() action {
 type opts struct {
 	// mutually-exclusive operation modifiers
 	list      bool
-	listJSON  bool
 	show      bool   // was --show seen?
 	showArg   string // raw index token: "", "first", "last", or decimal
 	peek      bool
@@ -75,7 +74,7 @@ type opts struct {
 	drainDays int
 	drainHrs  int
 	statsShow bool
-	statsJSON bool
+	json      bool // --json: shared by --list and --stats, order-independent
 	doctor    bool
 	version   bool
 	update    string // "", "stable", "nightly"
@@ -110,13 +109,11 @@ func parseArgs(argv []string) (*opts, error) {
 			return o, nil
 		case a == "--list":
 			o.list = true
-		case a == "--json" && (o.list || o.statsShow):
-			if o.list {
-				o.listJSON = true
-			}
-			if o.statsShow {
-				o.statsJSON = true
-			}
+		case a == "--json":
+			// Order-independent: --json can appear before or after --list /
+			// --stats. Earlier we gated this on prior --list/--stats, which
+			// meant `yk --json --list` silently dropped --json.
+			o.json = true
 		case a == "--show":
 			// Optional argument: an integer, "first" (top = 0), or "last"
 			// (bottom = Len-1). Missing argument defaults to "first", which
@@ -145,8 +142,8 @@ func parseArgs(argv []string) (*opts, error) {
 				return nil, errors.New("--days requires a number")
 			}
 			n, err := strconv.Atoi(argv[i+1])
-			if err != nil || n < 0 {
-				return nil, fmt.Errorf("--days: invalid value %q", argv[i+1])
+			if err != nil || n <= 0 {
+				return nil, fmt.Errorf("--days: invalid value %q (must be a positive integer)", argv[i+1])
 			}
 			o.drainDays = n
 			i++
@@ -155,8 +152,8 @@ func parseArgs(argv []string) (*opts, error) {
 				return nil, errors.New("--hours requires a number")
 			}
 			n, err := strconv.Atoi(argv[i+1])
-			if err != nil || n < 0 {
-				return nil, fmt.Errorf("--hours: invalid value %q", argv[i+1])
+			if err != nil || n <= 0 {
+				return nil, fmt.Errorf("--hours: invalid value %q (must be a positive integer)", argv[i+1])
 			}
 			o.drainHrs = n
 			i++
@@ -206,10 +203,15 @@ func parseArgs(argv []string) (*opts, error) {
 			o.clipboardSrc = true
 		case a == "-h", a == "--help":
 			o.help = true
+		case strings.HasPrefix(a, "--"):
+			// Unknown double-dash flag — surface the typo instead of silently
+			// treating it as the user's command. `yk --lsit file` used to try
+			// to exec a program literally named `--lsit`; now it errors.
+			return nil, fmt.Errorf("unknown flag %q (run --help)", a)
 		case strings.HasPrefix(a, "-") && a != "-":
-			// Unknown flag — stop flag parsing and treat the rest as the
-			// user's command. This lets `yk ls -la` work without us
-			// trying to interpret `-la`.
+			// Unknown single-dash token — pass through as the start of the
+			// user's command so `yk ls -la` still works. Bare `-` is treated
+			// as a command name, not a flag.
 			o.rest = append(o.rest, argv[i:]...)
 			return o, nil
 		default:
@@ -278,7 +280,7 @@ func run() error {
 	case o.doctor:
 		return clipboard.Doctor(os.Stdout)
 	case o.statsShow:
-		return doStats(paths, o.statsJSON)
+		return doStats(paths, o.json)
 	case o.autoUpd != "":
 		return doAutoUpdate(paths, cfg, o.autoUpd)
 	case o.stable:
@@ -286,7 +288,7 @@ func run() error {
 	case o.update != "":
 		return update.Apply(cfg, o.update, os.Stderr)
 	case o.list:
-		return doList(paths, cfg, o.listJSON)
+		return doList(paths, cfg, o.json)
 	case o.show:
 		return doShow(paths, o.showArg)
 	case o.peek:
@@ -388,8 +390,13 @@ func doPush(paths platform.Paths, cfg *config.Config, o *opts) error {
 		data = buf.Bytes()
 		source = strings.Join(o.rest, " ")
 		if err != nil {
-			// Still push, but warn and preserve exit semantics.
 			if len(data) > 0 {
+				code := -1
+				if ee, ok := err.(*exec.ExitError); ok {
+					code = ee.ExitCode()
+				}
+				fmt.Fprintf(os.Stderr, "yoink-n-yeet: pushed %d bytes despite non-zero exit (code %d) from %q\n",
+					len(data), code, source)
 				if err2 := pushCommit(s, cfg, paths, data, source, o); err2 != nil {
 					return err2
 				}

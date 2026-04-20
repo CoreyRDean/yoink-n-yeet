@@ -2,6 +2,7 @@ package stack
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -156,6 +157,65 @@ func TestDrainOlderThan(t *testing.T) {
 	}
 	if string(got) != "keep" {
 		t.Fatalf("peek = %q, want keep", got)
+	}
+}
+
+func TestMoveToTopPreservesCreated(t *testing.T) {
+	s := newTestStack(t)
+	first, err := s.Push([]byte("bottom"), "t")
+	if err != nil {
+		t.Fatalf("push: %v", err)
+	}
+	// Backdate the first entry to simulate age.
+	originalCreated := time.Now().Add(-48 * time.Hour).UTC()
+	meta := Entry{
+		ID:      first.ID,
+		Created: originalCreated,
+		Size:    first.Size,
+		Source:  first.Source,
+	}
+	raw, _ := json.MarshalIndent(meta, "", "  ")
+	if err := os.WriteFile(first.MetaPath, raw, 0o600); err != nil {
+		t.Fatalf("rewrite meta: %v", err)
+	}
+
+	// Push a second entry so the first one is at index 1.
+	if _, err := s.Push([]byte("top"), "t"); err != nil {
+		t.Fatalf("push: %v", err)
+	}
+
+	if err := s.MoveToTop(1); err != nil {
+		t.Fatalf("MoveToTop: %v", err)
+	}
+
+	// After MoveToTop, the backdated entry should now be index 0 but its
+	// Created timestamp should still be 48h ago.
+	ents, err := s.List()
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(ents) != 2 {
+		t.Fatalf("entries = %d, want 2", len(ents))
+	}
+	top := ents[0]
+	data, err := os.ReadFile(top.Path)
+	if err != nil {
+		t.Fatalf("read top: %v", err)
+	}
+	if string(data) != "bottom" {
+		t.Fatalf("top payload = %q, want %q", data, "bottom")
+	}
+	if !top.Created.Equal(originalCreated) {
+		t.Fatalf("Created was reset: got %s, want %s", top.Created, originalCreated)
+	}
+
+	// And --drain --days 1 should still evict it even though it's now on top.
+	removed, err := s.Drain(24*time.Hour, false, false)
+	if err != nil {
+		t.Fatalf("drain: %v", err)
+	}
+	if removed != 1 {
+		t.Fatalf("drain removed = %d, want 1", removed)
 	}
 }
 
