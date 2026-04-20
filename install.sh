@@ -246,9 +246,12 @@ EOF
     log "wrote config: $CFG_FILE"
 else
     # Re-run: patch channel + installed_* metadata without destroying user
-    # prefs. Each patched line keeps a trailing comma; the config template
-    # puts max_depth last so the resulting JSON stays valid.
+    # prefs. Each awk replacement emits a trailing comma; a second awk pass
+    # strips that comma from any line immediately followed by a closing brace.
+    # That keeps both fresh configs and older legacy configs (which may still
+    # have installed_version as their last field) valid after the rewrite.
     tmp_cfg=$(mktemp)
+    tmp_cfg2=$(mktemp)
     INSTALLED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
     awk -v ch="$CHANNEL" -v ia="$INSTALLED_AT" -v iv="$VERSION" -v rp="${REPO_PATH:-}" '
         /"channel"[[:space:]]*:/        { print "  \"channel\": \"" ch "\","; next }
@@ -260,7 +263,21 @@ else
         }
         { print }
     ' "$CFG_FILE" >"$tmp_cfg"
-    mv "$tmp_cfg" "$CFG_FILE"
+    # One-line lookahead JSON tidy: if the next line is only a closing brace,
+    # remove any trailing comma from the previous line.
+    awk '
+        NR == 1 { prev = $0; next }
+        {
+            if ($0 ~ /^[[:space:]]*}[[:space:]]*$/) {
+                sub(/,[[:space:]]*$/, "", prev)
+            }
+            print prev
+            prev = $0
+        }
+        END { print prev }
+    ' "$tmp_cfg" >"$tmp_cfg2"
+    mv "$tmp_cfg2" "$CFG_FILE"
+    rm -f "$tmp_cfg"
     log "updated config: $CFG_FILE"
 fi
 
