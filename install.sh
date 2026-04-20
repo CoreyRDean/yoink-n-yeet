@@ -75,7 +75,15 @@ if [ "$LOCAL" -eq 1 ]; then
     COMMIT=$(git rev-parse HEAD 2>/dev/null || echo unknown)
     DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
     REPO_PATH=$(pwd -P)
-    VERSION="${VERSION:-v0.0.0-dev}"
+    # If the caller didn't pin --version, derive something meaningful from
+    # git so `yt --version` reports commits-ahead of the last tag plus a
+    # short SHA (e.g. v0.1.0-3-gccedc7e), with a -dirty suffix when the
+    # working tree has uncommitted changes. Falls back to the v0.0.0-dev
+    # sentinel when git isn't available or no tags exist yet.
+    if [ -z "$VERSION" ]; then
+        VERSION=$(git describe --tags --always --dirty 2>/dev/null || true)
+        [ -n "$VERSION" ] || VERSION="v0.0.0-dev"
+    fi
 
     log "building from source ($COMMIT)"
     go build -trimpath -ldflags "\
