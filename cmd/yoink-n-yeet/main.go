@@ -87,6 +87,8 @@ type opts struct {
 	reportTitle string
 	reportBody  string
 
+	clipboardSrc bool // --cb / -c: use the OS clipboard as the data source
+
 	// behavioral
 	noUpdateCheck bool
 	help          bool
@@ -195,6 +197,13 @@ func parseArgs(argv []string) (*opts, error) {
 			}
 		case a == "--no-update-check":
 			o.noUpdateCheck = true
+		case a == "--cb", a == "-c":
+			// Treat the OS clipboard as the source. On yoink/yk this imports
+			// the current clipboard contents onto the stack; on yeet/yt this
+			// reads the clipboard to stdout and *bypasses* the stack entirely
+			// — handy for piping whatever's in the clipboard without popping
+			// anything the user carefully stacked up.
+			o.clipboardSrc = true
 		case a == "-h", a == "--help":
 			o.help = true
 		case strings.HasPrefix(a, "-") && a != "-":
@@ -288,14 +297,71 @@ func run() error {
 		return doDrain(paths, o)
 	}
 
-	// Default-action branch: push or pop.
+	// Default-action branch: push or pop. --cb/-c short-circuits both sides:
+	// push imports the OS clipboard onto the stack; pop emits the OS
+	// clipboard to stdout without touching the stack.
 	switch defaultAction() {
 	case actPush:
+		if o.clipboardSrc {
+			return doPushClipboard(paths, cfg, o)
+		}
 		return doPush(paths, cfg, o)
 	case actPop:
+		if o.clipboardSrc {
+			return doPasteClipboardPassthrough()
+		}
 		return doPop(paths, cfg, o)
 	}
 	return nil
+}
+
+// doPushClipboard reads the OS clipboard and pushes the bytes onto the
+// stack as a regular entry (source: "clipboard"). Useful for grabbing
+// something you copied from another app into the yoink stack.
+func doPushClipboard(paths platform.Paths, cfg *config.Config, o *opts) error {
+	cb, err := clipboard.Detect()
+	if err != nil {
+		return fmt.Errorf("clipboard: %w", err)
+	}
+	data, err := cb.Paste()
+	if err != nil {
+		return fmt.Errorf("clipboard read: %w", err)
+	}
+	if len(data) == 0 {
+		fmt.Fprintln(os.Stderr, "clipboard is empty; nothing to push")
+		return nil
+	}
+	if o.dry {
+		if ok, err := confirmDryPush(data, "clipboard"); err != nil || !ok {
+			if err != nil {
+				return err
+			}
+			fmt.Fprintln(os.Stderr, "trashed.")
+			return nil
+		}
+	}
+	s, err := stack.New(paths.StackDir())
+	if err != nil {
+		return err
+	}
+	return pushCommit(s, cfg, paths, data, "clipboard", o)
+}
+
+// doPasteClipboardPassthrough emits the current OS clipboard contents to
+// stdout without touching the stack. It's the stack-free counterpart to
+// `yt`; useful for piping clipboard contents into another command when you
+// don't want to consume a stack entry.
+func doPasteClipboardPassthrough() error {
+	cb, err := clipboard.Detect()
+	if err != nil {
+		return fmt.Errorf("clipboard: %w", err)
+	}
+	data, err := cb.Paste()
+	if err != nil {
+		return fmt.Errorf("clipboard read: %w", err)
+	}
+	_, err = os.Stdout.Write(data)
+	return err
 }
 
 // ---------- actions ----------
@@ -875,6 +941,10 @@ Flags (valid on either name):
   --auto-update on|off|status toggle background auto-update (default off)
   --no-update-check           skip the async update check this run
   --uninstall                 remove the binary and symlinks
+  -c, --cb                    on yoink/yk: import the current OS clipboard
+                              onto the stack (source="clipboard");
+                              on yeet/yt: emit the OS clipboard to stdout
+                              without touching the stack
   --report [title] [body]     file a bug/feature issue on the upstream repo
                               (uses gh CLI if available and authed;
                               otherwise opens the GitHub issue form in
