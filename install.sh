@@ -121,10 +121,13 @@ else
     log "downloading $archive"
     curl -fsSL -o "$tmp/$archive" "$url" || die "download failed: $url"
 
-    # Verify sha256 against the published checksum file.
+    # Verify sha256 against the published checksum file. We match only the
+    # exact archive filename (second whitespace-separated column) so sibling
+    # artifacts like <archive>.sbom.json don't get pulled in and fail the
+    # check because they weren't downloaded.
     if curl -fsSL -o "$tmp/SHA256SUMS" "$sums_url"; then
         log "verifying sha256"
-        (cd "$tmp" && grep "$archive" SHA256SUMS | shasum -a 256 -c -) \
+        (cd "$tmp" && awk -v a="$archive" '$2==a' SHA256SUMS | shasum -a 256 -c -) \
             || die "sha256 mismatch for $archive"
     else
         log "warning: checksum file not available ($sums_url); skipping verification"
