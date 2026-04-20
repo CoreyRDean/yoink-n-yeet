@@ -16,9 +16,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -77,6 +79,10 @@ type opts struct {
 	autoUpd   string // "", "on", "off", "status"
 	uninstall bool
 
+	report      bool
+	reportTitle string
+	reportBody  string
+
 	// behavioral
 	noUpdateCheck bool
 	help          bool
@@ -106,15 +112,18 @@ func parseArgs(argv []string) (*opts, error) {
 				o.statsJSON = true
 			}
 		case a == "--show":
-			if i+1 >= len(argv) {
-				return nil, errors.New("--show requires an integer index")
+			// Default to 0 (top of stack) if no numeric argument follows. This
+			// makes `yt --show` behave like `yt --peek`, which is what users
+			// reach for when they just want to see what's on top.
+			o.show = 0
+			if i+1 < len(argv) && !strings.HasPrefix(argv[i+1], "-") {
+				n, err := strconv.Atoi(argv[i+1])
+				if err != nil {
+					return nil, fmt.Errorf("--show: %w", err)
+				}
+				o.show = n
+				i++
 			}
-			n, err := strconv.Atoi(argv[i+1])
-			if err != nil {
-				return nil, fmt.Errorf("--show: %w", err)
-			}
-			o.show = n
-			i++
 		case a == "--peek":
 			o.peek = true
 		case a == "--dry":
@@ -163,6 +172,19 @@ func parseArgs(argv []string) (*opts, error) {
 			i++
 		case a == "--uninstall":
 			o.uninstall = true
+		case a == "--report":
+			o.report = true
+			// Greedy-consume up to two positional trailers as title + body.
+			// Users can skip either by passing nothing; we'll prompt on a
+			// TTY or fail loudly otherwise.
+			if i+1 < len(argv) && !strings.HasPrefix(argv[i+1], "-") {
+				o.reportTitle = argv[i+1]
+				i++
+				if i+1 < len(argv) && !strings.HasPrefix(argv[i+1], "-") {
+					o.reportBody = argv[i+1]
+					i++
+				}
+			}
 		case a == "--no-update-check":
 			o.noUpdateCheck = true
 		case a == "-h", a == "--help":
@@ -234,6 +256,8 @@ func run() error {
 	switch {
 	case o.uninstall:
 		return doUninstall(cfg)
+	case o.report:
+		return doReport(o.reportTitle, o.reportBody)
 	case o.doctor:
 		return clipboard.Doctor(os.Stdout)
 	case o.statsShow:
@@ -519,6 +543,112 @@ func doAutoUpdate(paths platform.Paths, cfg *config.Config, mode string) error {
 	return nil
 }
 
+// doReport creates a GitHub issue on the upstream repo. The happy path
+// uses the `gh` CLI (fastest, no browser). If gh is missing, unauthenticated,
+// or fails for any other reason, we fall back to opening the GitHub web
+// issue-creation form in the user's default browser with the title and body
+// prefilled via query parameters.
+//
+// Missing title or body is filled in via interactive prompts on a TTY, and
+// treated as an error otherwise so scripts get a clear failure instead of
+// a blocking read.
+func doReport(title, body string) error {
+	const upstream = "CoreyRDean/yoink-n-yeet"
+
+	var err error
+	if title == "" {
+		title, err = promptLine(os.Stderr, "Issue title: ")
+		if err != nil {
+			return err
+		}
+	}
+	if title == "" {
+		return errors.New("--report: title is required")
+	}
+	if body == "" {
+		body, err = promptLine(os.Stderr, "Issue body (single line, blank to skip): ")
+		if err != nil {
+			return err
+		}
+	}
+
+	// Prefer gh CLI when available and authenticated.
+	if _, lookErr := exec.LookPath("gh"); lookErr == nil {
+		auth := exec.Command("gh", "auth", "status")
+		auth.Stdout = io.Discard
+		auth.Stderr = io.Discard
+		if authErr := auth.Run(); authErr == nil {
+			args := []string{"issue", "create", "--repo", upstream, "--title", title}
+			if body != "" {
+				args = append(args, "--body", body)
+			} else {
+				args = append(args, "--body", "")
+			}
+			cmd := exec.Command("gh", args...)
+			cmd.Stdout = os.Stdout
+			cmd.Stderr = os.Stderr
+			if runErr := cmd.Run(); runErr == nil {
+				return nil
+			}
+			// gh ran but errored (network, perms, etc.) — fall through to browser.
+			fmt.Fprintln(os.Stderr, "gh issue create failed; falling back to browser")
+		}
+	}
+
+	// Fallback: open the browser-based issue form with the fields prefilled.
+	v := url.Values{}
+	v.Set("title", title)
+	if body != "" {
+		v.Set("body", body)
+	}
+	link := "https://github.com/" + upstream + "/issues/new?" + v.Encode()
+	fmt.Fprintf(os.Stderr, "opening %s\n", link)
+	return openBrowser(link)
+}
+
+// openBrowser launches the platform's default URL handler. Best-effort: if
+// the platform is exotic or no handler is available, the URL is printed so
+// the user can copy it.
+func openBrowser(link string) error {
+	var cmd *exec.Cmd
+	switch runtime.GOOS {
+	case "darwin":
+		cmd = exec.Command("open", link)
+	case "windows":
+		cmd = exec.Command("rundll32", "url.dll,FileProtocolHandler", link)
+	default:
+		if _, err := exec.LookPath("xdg-open"); err == nil {
+			cmd = exec.Command("xdg-open", link)
+		} else {
+			fmt.Fprintln(os.Stderr, "no browser launcher found; open this URL manually:")
+			fmt.Fprintln(os.Stderr, link)
+			return nil
+		}
+	}
+	// Detach so the CLI can exit immediately; stdout/stderr suppressed so
+	// the browser process doesn't leak noise onto the terminal.
+	cmd.Stdout = io.Discard
+	cmd.Stderr = io.Discard
+	return cmd.Start()
+}
+
+// promptLine reads a single line from stdin, emitting msg as the prompt.
+// Returns an error with a helpful message when stdin is not a TTY, so scripts
+// that forgot to pass a title or body fail fast rather than blocking on a
+// closed pipe.
+func promptLine(w io.Writer, msg string) (string, error) {
+	if !isTTY(os.Stdin) {
+		return "", errors.New("stdin is not a TTY; supply title and body as --report args")
+	}
+	fmt.Fprint(w, msg)
+	reader := bufio.NewReader(os.Stdin)
+	line, err := reader.ReadString('\n')
+	if err != nil && !errors.Is(err, io.EOF) {
+		return "", err
+	}
+	return strings.TrimRight(line, "\r\n"), nil
+}
+
 func doUninstall(cfg *config.Config) error {
 	// Prefer the bundled uninstall.sh from a local install; fall back to
 	// fetching it from the repo.
@@ -635,6 +765,10 @@ Flags (valid on either name):
   --auto-update on|off|status toggle background auto-update (default off)
   --no-update-check           skip the async update check this run
   --uninstall                 remove the binary and symlinks
+  --report [title] [body]     file a bug/feature issue on the upstream repo
+                              (uses gh CLI if available and authed;
+                              otherwise opens the GitHub issue form in
+                              your browser with fields prefilled)
 
 See https://github.com/CoreyRDean/yoink-n-yeet`)
 }
