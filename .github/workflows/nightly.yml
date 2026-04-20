@@ -1,0 +1,53 @@
+name: nightly
+
+on:
+  schedule:
+    - cron: '23 7 * * *' # daily 07:23 UTC
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  nightly:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+
+      - name: install cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: install syft
+        uses: anchore/sbom-action/download-syft@v0
+
+      - name: compute nightly tag
+        id: tag
+        run: |
+          base=$(git describe --tags --abbrev=0 --match 'v*.*.*' 2>/dev/null || echo v0.1.0)
+          # Ensure the base doesn't already carry a prerelease suffix.
+          base=${base%%-*}
+          tag="${base}-nightly.$(date -u +%Y%m%d%H%M%S)"
+          echo "tag=$tag" >>"$GITHUB_OUTPUT"
+
+      - name: tag nightly
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "${{ steps.tag.outputs.tag }}" -m "Nightly build of main"
+          git push origin "${{ steps.tag.outputs.tag }}"
+
+      - uses: goreleaser/goreleaser-action@v6
+        with:
+          distribution: goreleaser
+          version: latest
+          args: release --clean --skip=validate
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GORELEASER_CURRENT_TAG: ${{ steps.tag.outputs.tag }}

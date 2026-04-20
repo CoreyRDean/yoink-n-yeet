@@ -1,0 +1,33 @@
+version: "2"
+
+run:
+  timeout: 5m
+
+linters:
+  default: none
+  enable:
+    - errcheck
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+    - misspell
+    - gocritic
+    - revive
+    - gosec
+
+  settings:
+    gosec:
+      excludes:
+        - G204 # we intentionally exec user-provided commands (that's the point)
+        - G304 # reading paths we derive ourselves is fine
+    revive:
+      rules:
+        - name: indent-error-flow
+        - name: var-declaration
+        - name: unexported-return
+
+formatters:
+  enable:
+    - gofmt
+    - goimports

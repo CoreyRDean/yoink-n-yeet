@@ -1,0 +1,131 @@
+version: 2
+
+project_name: yoink-n-yeet
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: yoink-n-yeet
+    main: ./cmd/yoink-n-yeet
+    binary: yoink-n-yeet
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+      - -X github.com/CoreyRDean/yoink-n-yeet/internal/buildinfo.Version={{.Version}}
+      - -X github.com/CoreyRDean/yoink-n-yeet/internal/buildinfo.Commit={{.FullCommit}}
+      - -X github.com/CoreyRDean/yoink-n-yeet/internal/buildinfo.Date={{.Date}}
+      - -X github.com/CoreyRDean/yoink-n-yeet/internal/buildinfo.Channel={{if .Prerelease}}nightly{{else}}stable{{end}}
+    goos: [linux, darwin, windows]
+    goarch: [amd64, arm64]
+
+archives:
+  - id: default
+    name_template: >-
+      {{- .ProjectName }}_
+      {{- .Version }}_
+      {{- .Os }}_
+      {{- .Arch }}
+    formats:
+      - tar.gz
+    format_overrides:
+      - goos: windows
+        formats:
+          - zip
+    files:
+      - README.md
+      - LICENSE
+      - CHANGELOG.md
+      - install.sh
+      - uninstall.sh
+
+checksum:
+  name_template: "{{ .ProjectName }}_{{ .Version }}_checksums.txt"
+  algorithm: sha256
+
+sboms:
+  - artifacts: archive
+
+signs:
+  - cmd: cosign
+    signature: "${artifact}.sig"
+    certificate: "${artifact}.pem"
+    args:
+      - sign-blob
+      - "--yes"
+      - "--output-signature=${signature}"
+      - "--output-certificate=${certificate}"
+      - "${artifact}"
+    artifacts: checksum
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-next"
+
+changelog:
+  use: github
+  sort: asc
+  groups:
+    - title: Features
+      regexp: '^.*?feat(\(.+\))??!?:.+$'
+      order: 0
+    - title: Fixes
+      regexp: '^.*?fix(\(.+\))??!?:.+$'
+      order: 1
+    - title: Other
+      order: 999
+  filters:
+    exclude:
+      - '^docs:'
+      - '^test:'
+      - '^chore:'
+
+release:
+  github:
+    owner: CoreyRDean
+    name: yoink-n-yeet
+  draft: false
+  prerelease: auto
+  mode: replace
+  header: |
+    ## yoink-n-yeet {{ .Tag }}
+    A clipboard stack CLI.
+
+    Install via `curl`:
+
+    ```sh
+    curl -fsSL https://raw.githubusercontent.com/CoreyRDean/yoink-n-yeet/main/install.sh | bash
+    ```
+
+# Homebrew tap publishing is wired up but commented out for the initial
+# v0.1.0 release. To enable:
+#
+#   1. Create the repo  CoreyRDean/homebrew-tap  (public, empty is fine).
+#   2. Generate a fine-grained PAT with contents:write on that repo.
+#   3. Store it as the HOMEBREW_TAP_TOKEN secret on this repo.
+#   4. Uncomment the block below and re-tag.
+#
+# brews:
+#   - name: yoink-n-yeet
+#     repository:
+#       owner: CoreyRDean
+#       name: homebrew-tap
+#       token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
+#     commit_author:
+#       name: goreleaser-bot
+#       email: bot@yoinknyeet.dev
+#     homepage: https://github.com/CoreyRDean/yoink-n-yeet
+#     description: A clipboard-stack CLI. yoink pushes, yeet pops.
+#     license: MIT
+#     test: |
+#       system "#{bin}/yoink-n-yeet --version"
+#     install: |
+#       bin.install "yoink-n-yeet"
+#       bin.install_symlink "yoink-n-yeet" => "yoink"
+#       bin.install_symlink "yoink-n-yeet" => "yeet"
+#       bin.install_symlink "yoink-n-yeet" => "yk"
+#       bin.install_symlink "yoink-n-yeet" => "yt"
+#     skip_upload: auto

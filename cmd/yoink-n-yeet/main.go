@@ -1,0 +1,640 @@
+// Command yoink-n-yeet is a cross-platform clipboard-stack CLI.
+//
+// The same binary is invoked under four names (all symlinks):
+//
+//	yoink  / yk   push  (run a command and push its stdout, or push stdin)
+//	yeet   / yt   pop   (emit the top entry to stdout and remove it)
+//
+// argv[0] determines the *default* action. Every flag below works on either
+// name, so e.g. `yt --list` and `yk --list` are identical.
+package main
+
+import (
+	"bufio"
+	"bytes"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/CoreyRDean/yoink-n-yeet/internal/buildinfo"
+	"github.com/CoreyRDean/yoink-n-yeet/internal/clipboard"
+	"github.com/CoreyRDean/yoink-n-yeet/internal/config"
+	"github.com/CoreyRDean/yoink-n-yeet/internal/platform"
+	"github.com/CoreyRDean/yoink-n-yeet/internal/redact"
+	"github.com/CoreyRDean/yoink-n-yeet/internal/stack"
+	"github.com/CoreyRDean/yoink-n-yeet/internal/stats"
+	"github.com/CoreyRDean/yoink-n-yeet/internal/update"
+)
+
+// action is the default operation picked from argv[0].
+type action int
+
+const (
+	actPush action = iota
+	actPop
+)
+
+func defaultAction() action {
+	name := filepath.Base(os.Args[0])
+	// Trim platform-specific suffix so a .exe rename on Windows still works.
+	name = strings.TrimSuffix(name, ".exe")
+	switch name {
+	case "yeet", "yt":
+		return actPop
+	default:
+		// yoink / yk / yoink-n-yeet / unknown → push
+		return actPush
+	}
+}
+
+// opts captures every flag the CLI supports. We parse argv manually rather
+// than via the flag package because we need to stop consuming flags at the
+// first positional arg when the action is push (so the user's command and
+// args are passed through verbatim).
+type opts struct {
+	// mutually-exclusive operation modifiers
+	list      bool
+	listJSON  bool
+	show      int // -1 = not set
+	peek      bool
+	dry       bool
+	drain     bool
+	drainDays int
+	drainHrs  int
+	statsShow bool
+	statsJSON bool
+	doctor    bool
+	version   bool
+	update    string // "", "stable", "nightly"
+	stable    bool
+	autoUpd   string // "", "on", "off", "status"
+	uninstall bool
+
+	// behavioral
+	noUpdateCheck bool
+	help          bool
+
+	// positional remainder after -- or first non-flag token
+	rest []string
+}
+
+// parseArgs consumes os.Args[1:] and produces opts. Unknown flags are
+// returned as errors.
+func parseArgs(argv []string) (*opts, error) {
+	o := &opts{show: -1}
+	i := 0
+	for i < len(argv) {
+		a := argv[i]
+		switch {
+		case a == "--":
+			o.rest = append(o.rest, argv[i+1:]...)
+			return o, nil
+		case a == "--list":
+			o.list = true
+		case a == "--json" && (o.list || o.statsShow):
+			if o.list {
+				o.listJSON = true
+			}
+			if o.statsShow {
+				o.statsJSON = true
+			}
+		case a == "--show":
+			if i+1 >= len(argv) {
+				return nil, errors.New("--show requires an integer index")
+			}
+			n, err := strconv.Atoi(argv[i+1])
+			if err != nil {
+				return nil, fmt.Errorf("--show: %w", err)
+			}
+			o.show = n
+			i++
+		case a == "--peek":
+			o.peek = true
+		case a == "--dry":
+			o.dry = true
+		case a == "--drain", a == "--clear":
+			o.drain = true
+		case a == "--days":
+			if i+1 >= len(argv) {
+				return nil, errors.New("--days requires a number")
+			}
+			n, err := strconv.Atoi(argv[i+1])
+			if err != nil || n < 0 {
+				return nil, fmt.Errorf("--days: invalid value %q", argv[i+1])
+			}
+			o.drainDays = n
+			i++
+		case a == "--hours":
+			if i+1 >= len(argv) {
+				return nil, errors.New("--hours requires a number")
+			}
+			n, err := strconv.Atoi(argv[i+1])
+			if err != nil || n < 0 {
+				return nil, fmt.Errorf("--hours: invalid value %q", argv[i+1])
+			}
+			o.drainHrs = n
+			i++
+		case a == "--stats":
+			o.statsShow = true
+		case a == "--doctor":
+			o.doctor = true
+		case a == "--version":
+			o.version = true
+		case a == "--update":
+			o.update = "stable"
+			if i+1 < len(argv) && !strings.HasPrefix(argv[i+1], "-") {
+				o.update = argv[i+1]
+				i++
+			}
+		case a == "--stable":
+			o.stable = true
+		case a == "--auto-update":
+			if i+1 >= len(argv) {
+				return nil, errors.New("--auto-update requires on|off|status")
+			}
+			o.autoUpd = argv[i+1]
+			i++
+		case a == "--uninstall":
+			o.uninstall = true
+		case a == "--no-update-check":
+			o.noUpdateCheck = true
+		case a == "-h", a == "--help":
+			o.help = true
+		case strings.HasPrefix(a, "-") && a != "-":
+			// Unknown flag — stop flag parsing and treat the rest as the
+			// user's command. This lets `yk ls -la` work without us
+			// trying to interpret `-la`.
+			o.rest = append(o.rest, argv[i:]...)
+			return o, nil
+		default:
+			o.rest = append(o.rest, argv[i:]...)
+			return o, nil
+		}
+		i++
+	}
+	return o, nil
+}
+
+func main() {
+	if err := run(); err != nil {
+		fmt.Fprintln(os.Stderr, "yoink-n-yeet:", err)
+		os.Exit(1)
+	}
+}
+
+func run() error {
+	o, err := parseArgs(os.Args[1:])
+	if err != nil {
+		return err
+	}
+	if o.help {
+		printHelp(os.Stdout)
+		return nil
+	}
+	if o.version {
+		fmt.Println(update.Banner())
+		return nil
+	}
+
+	paths, err := platform.Resolve()
+	if err != nil {
+		return fmt.Errorf("resolve paths: %w", err)
+	}
+	cfg, err := config.Load(paths.ConfigFile())
+	if err != nil {
+		return fmt.Errorf("load config: %w", err)
+	}
+	// Channel defaults to the one baked into the binary if config is fresh.
+	if cfg.Channel == "" {
+		cfg.Channel = buildinfo.Channel
+	}
+	if buildinfo.Channel == "local" && buildinfo.RepoPath != "" && cfg.LocalRepoPath == "" {
+		cfg.LocalRepoPath = buildinfo.RepoPath
+	}
+
+	// Fire off the async update check early so it can race alongside real
+	// work. Skipped if the user opted out or config disables it.
+	if !o.noUpdateCheck {
+		update.BackgroundCheck(cfg, paths.UpdateCacheFile())
+	}
+	// Show a banner from the *previous* run's cache, on stderr only so we
+	// never corrupt stdout pipes.
+	update.MaybeBanner(os.Stderr, cfg, paths.UpdateCacheFile())
+
+	// Dispatch, in priority order. Single-purpose flags win over default
+	// push/pop so that e.g. `yk --list cat file` treats --list as the
+	// intent and ignores the positional command.
+	switch {
+	case o.uninstall:
+		return doUninstall(cfg)
+	case o.doctor:
+		return clipboard.Doctor(os.Stdout)
+	case o.statsShow:
+		return doStats(paths, o.statsJSON)
+	case o.autoUpd != "":
+		return doAutoUpdate(paths, cfg, o.autoUpd)
+	case o.stable:
+		return update.Apply(cfg, "stable", os.Stderr)
+	case o.update != "":
+		return update.Apply(cfg, o.update, os.Stderr)
+	case o.list:
+		return doList(paths, cfg, o.listJSON)
+	case o.show >= 0:
+		return doShow(paths, o.show)
+	case o.peek:
+		return doShow(paths, 0)
+	case o.drain:
+		return doDrain(paths, o)
+	}
+
+	// Default-action branch: push or pop.
+	switch defaultAction() {
+	case actPush:
+		return doPush(paths, cfg, o)
+	case actPop:
+		return doPop(paths, cfg, o)
+	}
+	return nil
+}
+
+// ---------- actions ----------
+
+func doPush(paths platform.Paths, cfg *config.Config, o *opts) error {
+	s, err := stack.New(paths.StackDir())
+	if err != nil {
+		return err
+	}
+	var (
+		data   []byte
+		source string
+	)
+	if len(o.rest) > 0 {
+		// Run the user's command, capture stdout, stream stderr through.
+		cmd := exec.Command(o.rest[0], o.rest[1:]...)
+		var buf bytes.Buffer
+		cmd.Stdout = &buf
+		cmd.Stderr = os.Stderr
+		cmd.Stdin = os.Stdin
+		err := cmd.Run()
+		// We push whatever stdout was produced even on non-zero exit so
+		// partial output isn't lost; the error surfaces afterwards.
+		data = buf.Bytes()
+		source = strings.Join(o.rest, " ")
+		if err != nil {
+			// Still push, but warn and preserve exit semantics.
+			if len(data) > 0 {
+				if err2 := pushCommit(s, cfg, paths, data, source, o); err2 != nil {
+					return err2
+				}
+			}
+			return err
+		}
+	} else if !isTTY(os.Stdin) {
+		// Pipe in.
+		b, err := io.ReadAll(os.Stdin)
+		if err != nil {
+			return err
+		}
+		data = b
+		source = "stdin"
+	} else {
+		return errors.New("nothing to push: provide a command (e.g. 'yk cat file') or pipe input (e.g. 'cmd | yk')")
+	}
+
+	if o.dry {
+		if ok, err := confirmDryPush(data, source); err != nil || !ok {
+			if err != nil {
+				return err
+			}
+			fmt.Fprintln(os.Stderr, "trashed.")
+			return nil
+		}
+	}
+	return pushCommit(s, cfg, paths, data, source, o)
+}
+
+func pushCommit(s *stack.Stack, cfg *config.Config, paths platform.Paths, data []byte, source string, _ *opts) error {
+	e, err := s.Push(data, source)
+	if err != nil {
+		return err
+	}
+	// Mirror the top of the stack to the OS clipboard. Failure here is
+	// non-fatal — the stack still has the entry.
+	if cb, err := clipboard.Detect(); err == nil {
+		_ = cb.Copy(data)
+	}
+	_ = stats.Append(paths.StatsFile(), stats.Event{
+		Time:   time.Now().UTC(),
+		Op:     stats.OpPush,
+		Size:   e.Size,
+		Source: source,
+	})
+	return nil
+}
+
+func doPop(paths platform.Paths, cfg *config.Config, o *opts) error {
+	s, err := stack.New(paths.StackDir())
+	if err != nil {
+		return err
+	}
+	// Dry-mode: preview top + confirm before consuming.
+	if o.dry {
+		e, data, err := s.Peek()
+		if err != nil {
+			if errors.Is(err, stack.ErrEmpty) {
+				fmt.Fprintln(os.Stderr, "stack is empty")
+				return nil
+			}
+			return err
+		}
+		fmt.Fprintln(os.Stderr, formatDryPopPreview(e, data, cfg.PreviewWidth))
+		if ok, err := promptYN(os.Stderr, "pop this entry?", false); err != nil || !ok {
+			if err != nil {
+				return err
+			}
+			fmt.Fprintln(os.Stderr, "cancelled.")
+			return nil
+		}
+	}
+
+	e, data, err := s.Pop()
+	if err != nil {
+		if errors.Is(err, stack.ErrEmpty) {
+			fmt.Fprintln(os.Stderr, "stack is empty")
+			return nil
+		}
+		return err
+	}
+	// Emit payload to stdout.
+	if _, err := os.Stdout.Write(data); err != nil {
+		return err
+	}
+	// Re-mirror the new top (or clear the clipboard if empty).
+	if cb, err := clipboard.Detect(); err == nil {
+		if _, top, err := s.Peek(); err == nil {
+			_ = cb.Copy(top)
+		} else if errors.Is(err, stack.ErrEmpty) {
+			_ = cb.Copy(nil)
+		}
+	}
+	ageMs := time.Since(e.Created).Milliseconds()
+	_ = stats.Append(paths.StatsFile(), stats.Event{
+		Time:  time.Now().UTC(),
+		Op:    stats.OpPop,
+		Size:  e.Size,
+		AgeMs: ageMs,
+	})
+	return nil
+}
+
+func doList(paths platform.Paths, cfg *config.Config, asJSON bool) error {
+	s, err := stack.New(paths.StackDir())
+	if err != nil {
+		return err
+	}
+	ents, err := s.List()
+	if err != nil {
+		return err
+	}
+	if asJSON {
+		return json.NewEncoder(os.Stdout).Encode(ents)
+	}
+	if len(ents) == 0 {
+		fmt.Fprintln(os.Stderr, "stack is empty")
+		return nil
+	}
+	for i, e := range ents {
+		raw, err := os.ReadFile(e.Path)
+		if err != nil {
+			fmt.Fprintf(os.Stdout, "[%d] %s  %s  <unreadable: %v>\n",
+				i, e.Created.Local().Format("2006-01-02 15:04:05"), humanSize(e.Size), err)
+			continue
+		}
+		pv := redact.Preview(string(raw), cfg.PreviewWidth)
+		fmt.Fprintf(os.Stdout, "[%d] %s  %s  %s\n",
+			i, e.Created.Local().Format("2006-01-02 15:04:05"), humanSize(e.Size), pv)
+	}
+	return nil
+}
+
+func doShow(paths platform.Paths, idx int) error {
+	s, err := stack.New(paths.StackDir())
+	if err != nil {
+		return err
+	}
+	_, data, err := s.At(idx)
+	if err != nil {
+		return err
+	}
+	_, err = os.Stdout.Write(data)
+	return err
+}
+
+func doDrain(paths platform.Paths, o *opts) error {
+	s, err := stack.New(paths.StackDir())
+	if err != nil {
+		return err
+	}
+	var (
+		d   time.Duration
+		all bool
+	)
+	switch {
+	case o.drainDays > 0:
+		d = time.Duration(o.drainDays) * 24 * time.Hour
+	case o.drainHrs > 0:
+		d = time.Duration(o.drainHrs) * time.Hour
+	default:
+		all = true
+	}
+	n, err := s.Len()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		fmt.Fprintln(os.Stderr, "stack is empty")
+		return nil
+	}
+	prompt := fmt.Sprintf("drain all %d entries?", n)
+	if d > 0 {
+		prompt = fmt.Sprintf("drain entries older than %s?", d)
+	}
+	ok, err := promptYN(os.Stderr, prompt, false)
+	if err != nil || !ok {
+		if err != nil {
+			return err
+		}
+		fmt.Fprintln(os.Stderr, "cancelled.")
+		return nil
+	}
+	removed, err := s.Drain(d, all, true)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(os.Stderr, "removed %d entries\n", removed)
+	// If we cleared everything, also clear the OS clipboard.
+	if leftover, _ := s.Len(); leftover == 0 {
+		if cb, err := clipboard.Detect(); err == nil {
+			_ = cb.Copy(nil)
+		}
+	}
+	return nil
+}
+
+func doStats(paths platform.Paths, asJSON bool) error {
+	s, err := stats.Summarize(paths.StatsFile())
+	if err != nil {
+		return err
+	}
+	if asJSON {
+		return json.NewEncoder(os.Stdout).Encode(s)
+	}
+	stats.WriteHuman(os.Stdout, s)
+	return nil
+}
+
+func doAutoUpdate(paths platform.Paths, cfg *config.Config, mode string) error {
+	switch mode {
+	case "on":
+		cfg.AutoUpdate = true
+	case "off":
+		cfg.AutoUpdate = false
+	case "status":
+		fmt.Printf("auto-update: %s\n", boolOnOff(cfg.AutoUpdate))
+		return nil
+	default:
+		return fmt.Errorf("--auto-update: want on|off|status, got %q", mode)
+	}
+	if err := config.Save(paths.ConfigFile(), cfg); err != nil {
+		return err
+	}
+	fmt.Printf("auto-update: %s\n", boolOnOff(cfg.AutoUpdate))
+	return nil
+}
+
+func doUninstall(cfg *config.Config) error {
+	// Prefer the bundled uninstall.sh from a local install; fall back to
+	// fetching it from the repo.
+	var script string
+	if cfg.Channel == "local" && cfg.LocalRepoPath != "" {
+		candidate := filepath.Join(cfg.LocalRepoPath, "uninstall.sh")
+		if _, err := os.Stat(candidate); err == nil {
+			script = candidate
+		}
+	}
+	if script == "" {
+		url := fmt.Sprintf("https://raw.githubusercontent.com/%s/main/uninstall.sh", update.Repo)
+		path, err := update.FetchInstaller(url)
+		if err != nil {
+			return fmt.Errorf("fetch uninstaller: %w", err)
+		}
+		defer os.Remove(path)
+		script = path
+	}
+	cmd := exec.Command("/bin/sh", script)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	cmd.Stdin = os.Stdin
+	return cmd.Run()
+}
+
+// ---------- helpers ----------
+
+func isTTY(f *os.File) bool {
+	fi, err := f.Stat()
+	if err != nil {
+		return false
+	}
+	return (fi.Mode() & os.ModeCharDevice) != 0
+}
+
+func promptYN(w io.Writer, msg string, defaultYes bool) (bool, error) {
+	suffix := " [y/N] "
+	if defaultYes {
+		suffix = " [Y/n] "
+	}
+	fmt.Fprint(w, msg+suffix)
+	if !isTTY(os.Stdin) {
+		// Non-interactive: choose the safe default, which is "no".
+		fmt.Fprintln(w, "(non-interactive; defaulting to no)")
+		return false, nil
+	}
+	reader := bufio.NewReader(os.Stdin)
+	line, err := reader.ReadString('\n')
+	if err != nil && !errors.Is(err, io.EOF) {
+		return false, err
+	}
+	ans := strings.ToLower(strings.TrimSpace(line))
+	if ans == "" {
+		return defaultYes, nil
+	}
+	return ans == "y" || ans == "yes", nil
+}
+
+func confirmDryPush(data []byte, source string) (bool, error) {
+	preview := redact.Preview(string(data), 80)
+	fmt.Fprintf(os.Stderr, "would push %d byte(s) from %q:\n  %s\n", len(data), source, preview)
+	return promptYN(os.Stderr, "push this entry?", true)
+}
+
+func formatDryPopPreview(e *stack.Entry, data []byte, width int) string {
+	pv := redact.Preview(string(data), width)
+	return fmt.Sprintf("top-of-stack: %s  %s\n  %s",
+		e.Created.Local().Format("2006-01-02 15:04:05"), humanSize(e.Size), pv)
+}
+
+func humanSize(n int64) string {
+	const k = 1024
+	switch {
+	case n < k:
+		return fmt.Sprintf("%dB", n)
+	case n < k*k:
+		return fmt.Sprintf("%.1fKiB", float64(n)/k)
+	case n < k*k*k:
+		return fmt.Sprintf("%.1fMiB", float64(n)/(k*k))
+	default:
+		return fmt.Sprintf("%.1fGiB", float64(n)/(k*k*k))
+	}
+}
+
+func boolOnOff(b bool) string {
+	if b {
+		return "on"
+	}
+	return "off"
+}
+
+func printHelp(w io.Writer) {
+	fmt.Fprintln(w, `yoink-n-yeet — a clipboard stack
+
+Usage:
+  yoink / yk  <cmd> [args]    run <cmd>, push stdout
+  ... | yoink / yk            push stdin
+  yeet / yt                   pop top of stack to stdout
+
+Flags (valid on either name):
+  --list [--json]             list stack (0 = top)
+  --show N                    print entry N to stdout (no consumption)
+  --peek                      alias for --show 0
+  --dry                       preview + interactive prompt
+  --drain, --clear            wipe the stack (confirms)
+  --drain --days N            drop entries older than N days
+  --drain --hours N           drop entries older than N hours
+  --stats [--json]            usage summary
+  --doctor                    platform + clipboard diagnostics
+  --version                   show version + channel
+  --update [stable|nightly]   self-update (stable is default)
+  --stable                    shortcut for --update stable
+  --auto-update on|off|status toggle background auto-update (default off)
+  --no-update-check           skip the async update check this run
+  --uninstall                 remove the binary and symlinks
+
+See https://github.com/CoreyRDean/yoink-n-yeet`)
+}
