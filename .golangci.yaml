@@ -1,13 +1,13 @@
-# golangci-lint v1 config schema. The golangci-lint-action@v6 pin ships
-# golangci-lint 1.x, which rejects the v2 schema with
-# "the configuration contains invalid elements". When we upgrade the
-# action to v7+ and golangci-lint v2.x, flip this file to `version: "2"`
-# and move settings under `linters.settings` / `formatters`.
+# golangci-lint v2 config schema. Active when using golangci-lint-action@v7+
+# (which ships golangci-lint v2.x). v1 is the legacy schema; v2 reorganizes
+# linter-settings under `linters.settings` and splits formatters out.
+version: "2"
+
 run:
   timeout: 5m
 
 linters:
-  disable-all: true
+  default: none
   enable:
     - errcheck
     - govet
@@ -18,16 +18,27 @@ linters:
     - gocritic
     - revive
     - gosec
+  settings:
+    errcheck:
+      # Best-effort cleanup calls — unchecked errors here are noise, not bugs.
+      exclude-functions:
+        - (io.Closer).Close
+        - os.Remove
+        - (*os.File).Close
+        - (io.ReadCloser).Close
+    gosec:
+      excludes:
+        - G204 # exec of user-provided commands is the entire point of this tool
+        - G304 # paths derived from our own state, not untrusted input
+        - G301 # 0o755 directories are conventional for user caches
+        - G302 # 0o755 file perms acceptable for stack entries / scripts
+    revive:
+      rules:
+        - name: indent-error-flow
+        - name: var-declaration
+        - name: unexported-return
+
+formatters:
+  enable:
     - gofmt
     - goimports
-
-linters-settings:
-  gosec:
-    excludes:
-      - G204 # we intentionally exec user-provided commands (that's the point)
-      - G304 # reading paths we derive ourselves is fine
-  revive:
-    rules:
-      - name: indent-error-flow
-      - name: var-declaration
-      - name: unexported-return
